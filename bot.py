@@ -19,13 +19,37 @@ DATA=Path(os.getenv("DATA_DIR","/app/data")); PROFILE=DATA/"hostslate-profile"; 
 logging.basicConfig(level=logging.INFO,format="%(asctime)s %(levelname)s %(message)s")
 lock=threading.Lock(); state={"running":False,"paused":False,"busy":False,"phase":"空闲","current":"-","total":0,"done":0,"next_run":"-","last":"未执行"}
 runtime_app=None
+progress_messages={}
+
+def progress_text():
+ total=state["total"]; done=state["done"]
+ if total:
+  pct=int(done*100/total); width=10; filled=int(width*done/total)
+  bar="🟩"*filled+"⬜"*(width-filled)
+  progress=f"{bar} {pct}%  ({done}/{total})"
+ else: progress="⏳ 等待获取实例数量"
+ mode="⏸️ 已暂停" if state["paused"] else ("🟢 运行中" if state["running"] else "⚪ 空闲")
+ return ("🔄 *HostSlate 续费任务*\n\n"
+         f"{mode}　{'处理中' if state['busy'] else '待命'}\n"
+         f"📍 阶段：{state['phase']}\n"
+         f"🖥️ 当前：{state['current']}\n"
+         f"📈 进度：{progress}\n"
+         f"⏱️ 下次运行：{state['next_run']}\n"
+         f"📝 最近结果：{state['last']}")
 
 async def progress(text):
  state["phase"]=text
  logging.info("PROGRESS %s", text)
  if runtime_app:
   for uid in ALLOWED:
-   try: await runtime_app.bot.send_message(int(uid), "📊 " + text)
+   try:
+    chat_id=int(uid); body=progress_text(); mid=progress_messages.get(chat_id)
+    if mid:
+     try: await runtime_app.bot.edit_message_text(chat_id=chat_id,message_id=mid,text=body,parse_mode="Markdown")
+     except Exception: progress_messages.pop(chat_id,None)
+    if chat_id not in progress_messages:
+     m=await runtime_app.bot.send_message(chat_id,body,parse_mode="Markdown")
+     progress_messages[chat_id]=m.message_id
    except Exception: pass
 
 def allowed(u): return not ALLOWED or str(u.effective_user.id) in ALLOWED
@@ -35,26 +59,27 @@ async def msg(update,text):
  if allowed(update): await update.message.reply_text(text)
 async def status(update,context):
  if not allowed(update): return
- s=(f"运行中: {state['running']}\n暂停: {state['paused']}\n进行中: {state['busy']}\n"
-    f"阶段: {state['phase']}\n当前: {state['current']}\n进度: {state['done']}/{state['total']}\n"
-    f"下次运行: {state['next_run']}\n最近结果: {state['last']}")
- await update.message.reply_text(s)
+ await update.message.reply_text(progress_text(),parse_mode="Markdown")
 async def start(update,context):
  if not allowed(update): return
  with lock: state.update(running=True,paused=False)
- await update.message.reply_text("已启动循环任务。")
+ await update.message.reply_text("🟢 *续费循环已启动*\n\n进度会持续更新在同一条消息中。",parse_mode="Markdown")
+ await progress("等待下一轮任务")
 async def pause(update,context):
  if not allowed(update): return
  with lock: state["paused"]=True
- await update.message.reply_text("已暂停，不会开始新的续费操作。")
+ await progress("已暂停，不会开始新的续费操作")
+ await update.message.reply_text("⏸️ *任务已暂停*",parse_mode="Markdown")
 async def resume(update,context):
  if not allowed(update): return
  with lock: state.update(running=True,paused=False)
- await update.message.reply_text("已恢复循环任务。")
+ await progress("已恢复，等待下一轮任务")
+ await update.message.reply_text("▶️ *任务已恢复*",parse_mode="Markdown")
 async def stop(update,context):
  if not allowed(update): return
  with lock: state.update(running=False,paused=False)
- await update.message.reply_text("已停止循环任务。")
+ await progress("任务已停止")
+ await update.message.reply_text("⏹️ *任务已停止*",parse_mode="Markdown")
 async def check(update,context):
  if not allowed(update): return
  await update.message.reply_text("正在执行一次检查……")
