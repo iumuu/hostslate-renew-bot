@@ -19,7 +19,7 @@ HOSTSLATE_API_KEY=os.getenv("HOSTSLATE_API_KEY","").strip()
 BASE="https://www.hostslate.com"
 API_BASE=BASE+"/api/v1"
 TRAFFIC_ALERT_PERCENT=float(os.getenv("TRAFFIC_ALERT_PERCENT","80"))
-API_AUTH_PREFIX=os.getenv("HOSTSLATE_API_AUTH_PREFIX","")
+API_AUTH_PREFIX=os.getenv("HOSTSLATE_API_AUTH_PREFIX","Bearer ")
 DATA=Path(os.getenv("DATA_DIR","/app/data")); PROFILE=DATA/"hostslate-profile"; DB=DATA/"state.db"
 logging.basicConfig(level=logging.INFO,format="%(asctime)s %(levelname)s %(message)s")
 lock=threading.Lock(); state={"running":False,"paused":False,"busy":False,"phase":"空闲","current":"-","total":0,"done":0,"next_run":"-","last":"未执行"}
@@ -110,6 +110,8 @@ async def api_get(path):
  if not HOSTSLATE_API_KEY: raise RuntimeError("未设置 HOSTSLATE_API_KEY")
  async with httpx.AsyncClient(timeout=30) as c:
   r=await c.get(API_BASE+path,headers={"Authorization":API_AUTH_PREFIX+HOSTSLATE_API_KEY})
+  if r.status_code in (401,403):
+   raise RuntimeError(f"HostSlate API {r.status_code}：API Key 无效或没有对应权限（认证方式：{API_AUTH_PREFIX.strip() or '原始Key'}）")
   r.raise_for_status(); return r.json()
 
 async def traffic_text():
