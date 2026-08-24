@@ -19,6 +19,7 @@ HOSTSLATE_API_KEY=os.getenv("HOSTSLATE_API_KEY","").strip()
 BASE="https://www.hostslate.com"
 API_BASE=BASE+"/api/v1"
 TRAFFIC_ALERT_PERCENT=float(os.getenv("TRAFFIC_ALERT_PERCENT","80"))
+API_AUTH_PREFIX=os.getenv("HOSTSLATE_API_AUTH_PREFIX","")
 DATA=Path(os.getenv("DATA_DIR","/app/data")); PROFILE=DATA/"hostslate-profile"; DB=DATA/"state.db"
 logging.basicConfig(level=logging.INFO,format="%(asctime)s %(levelname)s %(message)s")
 lock=threading.Lock(); state={"running":False,"paused":False,"busy":False,"phase":"空闲","current":"-","total":0,"done":0,"next_run":"-","last":"未执行"}
@@ -108,7 +109,7 @@ def gib(v):
 async def api_get(path):
  if not HOSTSLATE_API_KEY: raise RuntimeError("未设置 HOSTSLATE_API_KEY")
  async with httpx.AsyncClient(timeout=30) as c:
-  r=await c.get(API_BASE+path,headers={"Authorization":"Bearer "+HOSTSLATE_API_KEY})
+  r=await c.get(API_BASE+path,headers={"Authorization":API_AUTH_PREFIX+HOSTSLATE_API_KEY})
   r.raise_for_status(); return r.json()
 
 async def traffic_text():
@@ -199,7 +200,7 @@ async def api_renew_once():
    con=sqlite3.connect(DB); old=con.execute("select 1 from orders where key=?",(key,)).fetchone(); con.close()
    if old: done+=1; state["done"]=done; continue
    async with httpx.AsyncClient(timeout=30) as c:
-    h={"Authorization":"Bearer "+HOSTSLATE_API_KEY,"Content-Type":"application/json"}
+    h={"Authorization":API_AUTH_PREFIX+HOSTSLATE_API_KEY,"Content-Type":"application/json"}
     r=await c.post(f"{API_BASE}/portal/instances/{iid}/renew",headers=h,json={}); r.raise_for_status(); order=r.json()
     order=order.get("data",order); oid=pick(order,["id","order_id"])
     amount=float(pick(order,["amount","total_amount","payable_amount"],0) or 0)
