@@ -5,7 +5,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from playwright.async_api import async_playwright
 
-TOKEN=os.environ["TELEGRAM_BOT_TOKEN"]
+TOKEN=os.environ["TELEGRAM_BOT_TOKEN"].strip()
 ALLOWED={x.strip() for x in os.getenv("TELEGRAM_ALLOWED_USER_IDS","").split(",") if x.strip()}
 INTERVAL=max(60,int(os.getenv("RENEW_INTERVAL_MINUTES","60"))*60)
 AUTO_RENEW=os.getenv("AUTO_RENEW","NO").upper()=="YES"
