@@ -19,6 +19,7 @@ HOSTSLATE_API_KEY=os.getenv("HOSTSLATE_API_KEY","").strip()
 BASE="https://www.hostslate.com"
 API_BASE=BASE+"/api/v1"
 TRAFFIC_ALERT_PERCENT=float(os.getenv("TRAFFIC_ALERT_PERCENT","80"))
+RENEW_BILLING_CYCLE=os.getenv("RENEW_BILLING_CYCLE","monthly").strip().lower()
 API_AUTH_PREFIX=os.getenv("HOSTSLATE_API_AUTH_PREFIX","Bearer ")
 DATA=Path(os.getenv("DATA_DIR","/app/data")); PROFILE=DATA/"hostslate-profile"; DB=DATA/"state.db"
 logging.basicConfig(level=logging.INFO,format="%(asctime)s %(levelname)s %(message)s")
@@ -203,7 +204,10 @@ async def api_renew_once():
    if old: done+=1; state["done"]=done; continue
    async with httpx.AsyncClient(timeout=30) as c:
     h={"Authorization":API_AUTH_PREFIX+HOSTSLATE_API_KEY,"Content-Type":"application/json"}
-    r=await c.post(f"{API_BASE}/portal/instances/{iid}/renew",headers=h,json={}); r.raise_for_status(); order=r.json()
+    r=await c.post(f"{API_BASE}/portal/instances/{iid}/renew",headers=h,json={"billing_cycle":RENEW_BILLING_CYCLE})
+    if r.status_code == 422:
+     raise RuntimeError(f"续费参数校验失败：{r.text[:400]}")
+    r.raise_for_status(); order=r.json()
     order=order.get("data",order); oid=pick(order,["id","order_id"])
     amount=float(pick(order,["amount","total_amount","payable_amount"],0) or 0)
     result="renew-created"
