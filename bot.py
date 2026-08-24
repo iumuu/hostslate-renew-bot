@@ -4,6 +4,7 @@ from pathlib import Path
 from telegram import BotCommand, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from playwright.async_api import async_playwright
+import httpx
 
 TOKEN=os.environ["TELEGRAM_BOT_TOKEN"].strip()
 ALLOWED={x.strip() for x in os.getenv("TELEGRAM_ALLOWED_USER_IDS","").split(",") if x.strip()}
@@ -14,7 +15,10 @@ MAX_AMOUNT=float(os.getenv("MAX_RENEW_AMOUNT","0"))
 PAYMENT_PROVIDER=os.getenv("PAYMENT_PROVIDER","balance")
 LOGIN_USER=os.getenv("HOSTSLATE_USERNAME","")
 LOGIN_PASSWORD=os.getenv("HOSTSLATE_PASSWORD","")
+HOSTSLATE_API_KEY=os.getenv("HOSTSLATE_API_KEY","").strip()
 BASE="https://www.hostslate.com"
+API_BASE=BASE+"/api/v1"
+TRAFFIC_ALERT_PERCENT=float(os.getenv("TRAFFIC_ALERT_PERCENT","80"))
 DATA=Path(os.getenv("DATA_DIR","/app/data")); PROFILE=DATA/"hostslate-profile"; DB=DATA/"state.db"
 logging.basicConfig(level=logging.INFO,format="%(asctime)s %(levelname)s %(message)s")
 lock=threading.Lock(); state={"running":False,"paused":False,"busy":False,"phase":"空闲","current":"-","total":0,"done":0,"next_run":"-","last":"未执行"}
@@ -86,7 +90,58 @@ async def check(update,context):
  was_running=state["running"]; state["running"]=True
  result=await renew_once()
  state["running"]=was_running; state["last"]=result; await update.message.reply_text(result)
+def pick(obj, names, default=None):
+ if isinstance(obj, dict):
+  for name in names:
+   if name in obj and obj[name] is not None: return obj[name]
+  for v in obj.values():
+   r=pick(v,names,None)
+   if r is not None: return r
+ return default
+
+def gib(v):
+ try:
+  n=float(v or 0)
+  return n/1024**3 if n > 1024**2 else n
+ except Exception: return 0.0
+
+async def api_get(path):
+ if not HOSTSLATE_API_KEY: raise RuntimeError("未设置 HOSTSLATE_API_KEY")
+ async with httpx.AsyncClient(timeout=30) as c:
+  r=await c.get(API_BASE+path,headers={"Authorization":"Bearer "+HOSTSLATE_API_KEY})
+  r.raise_for_status(); return r.json()
+
+async def traffic_text():
+ data=await api_get("/portal/instances")
+ items=data.get("data",data) if isinstance(data,dict) else data
+ if isinstance(items,dict): items=items.get("items",items.get("instances",[]))
+ if not isinstance(items,list): items=[]
+ lines=["📡 *HostSlate VPS 流量监控*","━━━━━━━━━━━━"]
+ for i,item in enumerate(items):
+  iid=item.get("id") if isinstance(item,dict) else None
+  name=pick(item,["name","hostname","label"],f"实例 {i+1}")
+  try: metrics=await api_get(f"/portal/instances/{iid}/metrics") if iid else {}
+  except Exception as e: metrics={"error":str(e)}
+  try: packs=await api_get(f"/portal/instances/{iid}/traffic-packages") if iid else {}
+  except Exception: packs={}
+  used=pick(metrics,["traffic_used","used_traffic","total_traffic","bytes_used"],None)
+  if used is None: used=pick(item,["traffic_used","used_traffic","trafficUsage","bandwidth_used"],0)
+  limit=pick(packs,["traffic_limit","total","quota","included"],None)
+  if limit is None: limit=pick(item,["traffic_limit","traffic_quota","bandwidth"],0)
+  down=pick(metrics,["download","download_bytes","rx_bytes"],0); up=pick(metrics,["upload","upload_bytes","tx_bytes"],0)
+  used_g=gib(used); limit_g=gib(limit); pct=(used_g/limit_g*100) if limit_g else 0
+  flag="⚠️" if pct >= TRAFFIC_ALERT_PERCENT else "✅"
+  lines += [f"\n🖥️ *{name}*",f"📥 下载：{gib(down):.2f} GB",f"📤 上传：{gib(up):.2f} GB",f"📊 已用：{used_g:.2f} GB",f"📦 配额：{limit_g:.2f} GB",f"{flag} 使用率：{pct:.1f}%"]
+ return "\n".join(lines) if len(lines)>2 else "📡 未找到实例流量数据。"
+
+async def traffic(update,context):
+ if not allowed(update): return
+ try: await update.message.reply_text(await traffic_text(),parse_mode="Markdown")
+ except Exception as e: await update.message.reply_text("获取流量失败："+str(e)[:300])
+
 async def renew_once():
+ if HOSTSLATE_API_KEY:
+  return await api_renew_once()
  state.update(busy=True, done=0, total=0, current="-", phase="准备启动")
  try:
   async with async_playwright() as p:
@@ -128,6 +183,35 @@ async def renew_once():
    return f"本轮完成：发现 {n} 个入口，处理 {done} 个，自动支付={AUTO_PAY}。"
  except Exception as e:
   state.update(busy=False,phase="执行失败"); return "执行失败："+str(e)[:500]
+async def api_renew_once():
+ state.update(busy=True, done=0, total=0, current="-", phase="API 获取实例")
+ try:
+  data=await api_get("/portal/instances"); items=data.get("data",data) if isinstance(data,dict) else data
+  if isinstance(items,dict): items=items.get("items",items.get("instances",[]))
+  if not isinstance(items,list): items=[]
+  state["total"]=len(items); done=0
+  for item in items:
+   if state["paused"] or not state["running"]: break
+   iid=item.get("id"); name=pick(item,["name","hostname","label"],str(iid)); state["current"]=str(name); await progress(f"API 检查 {name}")
+   if not AUTO_RENEW: done+=1; state["done"]=done; continue
+   period=pick(item,["billing_period","period","next_due_at"],"current")
+   key=f"api-renew-{iid}-{period}"
+   con=sqlite3.connect(DB); old=con.execute("select 1 from orders where key=?",(key,)).fetchone(); con.close()
+   if old: done+=1; state["done"]=done; continue
+   async with httpx.AsyncClient(timeout=30) as c:
+    h={"Authorization":"Bearer "+HOSTSLATE_API_KEY,"Content-Type":"application/json"}
+    r=await c.post(f"{API_BASE}/portal/instances/{iid}/renew",headers=h,json={}); r.raise_for_status(); order=r.json()
+    order=order.get("data",order); oid=pick(order,["id","order_id"])
+    amount=float(pick(order,["amount","total_amount","payable_amount"],0) or 0)
+    result="renew-created"
+    if AUTO_PAY and amount <= MAX_AMOUNT and oid:
+     await progress(f"余额支付 {name}（{amount:.2f}）")
+     pr=await c.post(f"{API_BASE}/portal/orders/{oid}/pay",headers=h,json={"provider":"balance","method":"balance"}); pr.raise_for_status(); result="renew-paid"
+    con=sqlite3.connect(DB); con.execute("insert or replace into orders values(?,?,?)",(key,result,int(time.time()))); con.commit(); con.close()
+   done+=1; state["done"]=done; await progress(f"完成 {done}/{len(items)}：{name} · {result}")
+  state.update(busy=False,phase="API 本轮完成",current="-"); return f"API 本轮完成：{done}/{len(items)}，自动余额支付={AUTO_PAY}"
+ except Exception as e:
+  state.update(busy=False,phase="API 执行失败"); return "API 执行失败："+str(e)[:500]
 async def loop(app):
  while True:
   await asyncio.sleep(INTERVAL)
@@ -148,10 +232,11 @@ async def post_init(app):
   BotCommand("stop_task", "停止任务"),
   BotCommand("status", "查看运行状态"),
   BotCommand("renew", "立即检查一次"),
+  BotCommand("traffic", "查看 VPS 流量"),
  ])
  asyncio.create_task(loop(app))
 def main():
  initdb(); app=Application.builder().token(TOKEN).post_init(post_init).build()
- for cmd,fn in [("start_task",start),("pause_task",pause),("resume_task",resume),("stop_task",stop),("status",status),("renew",check)]: app.add_handler(CommandHandler(cmd,fn))
+ for cmd,fn in [("start_task",start),("pause_task",pause),("resume_task",resume),("stop_task",stop),("status",status),("renew",check),("traffic",traffic)]: app.add_handler(CommandHandler(cmd,fn))
  app.run_polling()
 if __name__=="__main__": main()
