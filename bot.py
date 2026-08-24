@@ -17,14 +17,28 @@ LOGIN_PASSWORD=os.getenv("HOSTSLATE_PASSWORD","")
 BASE="https://www.hostslate.com"
 DATA=Path(os.getenv("DATA_DIR","/app/data")); PROFILE=DATA/"hostslate-profile"; DB=DATA/"state.db"
 logging.basicConfig(level=logging.INFO,format="%(asctime)s %(levelname)s %(message)s")
-lock=threading.Lock(); state={"running":False,"paused":False,"last":"未执行"}
+lock=threading.Lock(); state={"running":False,"paused":False,"busy":False,"phase":"空闲","current":"-","total":0,"done":0,"next_run":"-","last":"未执行"}
+runtime_app=None
+
+async def progress(text):
+ state["phase"]=text
+ logging.info("PROGRESS %s", text)
+ if runtime_app:
+  for uid in ALLOWED:
+   try: await runtime_app.bot.send_message(int(uid), "📊 " + text)
+   except Exception: pass
 
 def allowed(u): return not ALLOWED or str(u.effective_user.id) in ALLOWED
 def initdb():
  DATA.mkdir(parents=True,exist_ok=True); sqlite3.connect(DB).execute("create table if not exists orders (key text primary key, result text, ts integer)").connection.commit()
 async def msg(update,text):
  if allowed(update): await update.message.reply_text(text)
-async def status(update,context): await msg(update,f"运行中: {state['running']}\n暂停: {state['paused']}\n最近结果: {state['last']}")
+async def status(update,context):
+ if not allowed(update): return
+ s=(f"运行中: {state['running']}\n暂停: {state['paused']}\n进行中: {state['busy']}\n"
+    f"阶段: {state['phase']}\n当前: {state['current']}\n进度: {state['done']}/{state['total']}\n"
+    f"下次运行: {state['next_run']}\n最近结果: {state['last']}")
+ await update.message.reply_text(s)
 async def start(update,context):
  if not allowed(update): return
  with lock: state.update(running=True,paused=False)
@@ -44,45 +58,64 @@ async def stop(update,context):
 async def check(update,context):
  if not allowed(update): return
  await update.message.reply_text("正在执行一次检查……")
+ was_running=state["running"]; state["running"]=True
  result=await renew_once()
- state["last"]=result; await update.message.reply_text(result)
+ state["running"]=was_running; state["last"]=result; await update.message.reply_text(result)
 async def renew_once():
+ state.update(busy=True, done=0, total=0, current="-", phase="准备启动")
  try:
   async with async_playwright() as p:
+   await progress("启动浏览器")
    browser=await p.chromium.launch_persistent_context(str(PROFILE),headless=True)
-   page=await browser.new_page(); await page.goto(BASE+"/login",wait_until="domcontentloaded")
-   await page.wait_for_url("**/portal/**",timeout=15000)
+   page=await browser.new_page(); await progress("打开登录页")
+   await page.goto(BASE+"/login",wait_until="domcontentloaded")
+   try: await page.wait_for_url("**/portal/**",timeout=15000)
+   except Exception:
+    state.update(busy=False,phase="等待登录或人机验证")
+    return "登录未完成：请先完成 HostSlate 登录和人机验证。"
+   await progress("读取实例列表")
    await page.goto(BASE+"/portal/instances",wait_until="networkidle")
-   buttons=page.get_by_text("续费",exact=False); n=await buttons.count()
-   if not n: await browser.close(); return "未发现续费按钮。首次登录或人机验证可能需要手动完成。"
+   buttons=page.get_by_text("续费",exact=False); n=await buttons.count(); state["total"]=n
+   if not n:
+    await browser.close(); state.update(busy=False,phase="未发现续费入口")
+    return "未发现续费按钮。"
    done=0
    for i in range(n):
+    if state["paused"] or not state["running"]:
+     state.update(busy=False,phase="已暂停/停止"); await browser.close(); return f"任务中止，已处理 {done}/{n}"
+    state["current"]=f"第 {i+1}/{n} 个实例"; await progress(f"检查 {state['current']}")
     if not AUTO_RENEW: continue
     key=f"{await buttons.nth(i).inner_text()}-{i}"
     con=sqlite3.connect(DB); old=con.execute("select 1 from orders where key=?",(key,)).fetchone(); con.close()
-    if old: continue
-    await buttons.nth(i).click(); await page.wait_for_timeout(1000)
-    # Only free balance orders are eligible for automatic payment.
+    if old: state["done"]=i+1; continue
+    await buttons.nth(i).click(); await page.wait_for_timeout(1000); await progress(f"已创建 {state['current']} 续费流程")
     body=(await page.locator("body").inner_text()).lower()
-    if AUTO_PAY and MAX_AMOUNT == 0 and any(x in body for x in ["0.00", "￥0", "¥0", "免费", "免费"]):
+    if AUTO_PAY and MAX_AMOUNT == 0 and any(x in body for x in ["0.00", "￥0", "¥0", "免费"]):
      pay=page.get_by_text("余额支付",exact=False)
      if await pay.count():
-      await pay.first.click(); await page.wait_for_timeout(1500)
-      status="renew-paid" if not await page.get_by_text("支付失败",exact=False).count() else "payment-failed"
-     else: status="payment-control-not-found"
-    else: status="renew-clicked-awaiting-confirmation"
-    con=sqlite3.connect(DB); con.execute("insert or replace into orders values(?,?,?)",(key,status,int(time.time()))); con.commit(); con.close(); done+=1
-   await browser.close(); return f"发现 {n} 个续费入口，已处理 {done} 个；自动支付={AUTO_PAY}（支付仍需人工确认）。"
- except Exception as e: return "执行失败："+str(e)[:500]
+      await progress(f"正在余额支付 {state['current']}"); await pay.first.click(); await page.wait_for_timeout(1500)
+      result="renew-paid" if not await page.get_by_text("支付失败",exact=False).count() else "payment-failed"
+     else: result="payment-control-not-found"
+    else: result="renew-clicked-awaiting-confirmation"
+    con=sqlite3.connect(DB); con.execute("insert or replace into orders values(?,?,?)",(key,result,int(time.time()))); con.commit(); con.close(); done+=1; state["done"]=i+1
+    await progress(f"完成 {state['done']}/{n}：{result}")
+   await browser.close(); state.update(busy=False,phase="本轮完成",current="-")
+   return f"本轮完成：发现 {n} 个入口，处理 {done} 个，自动支付={AUTO_PAY}。"
+ except Exception as e:
+  state.update(busy=False,phase="执行失败"); return "执行失败："+str(e)[:500]
 async def loop(app):
  while True:
   await asyncio.sleep(INTERVAL)
+  state["next_run"]="现在"
   if state["running"] and not state["paused"]:
    state["last"]=await renew_once()
    for uid in ALLOWED:
     try: await app.bot.send_message(int(uid),state["last"])
     except Exception: pass
+  state["next_run"]=f"约 {INTERVAL//60} 分钟后"
 async def post_init(app):
+ global runtime_app
+ runtime_app=app
  await app.bot.set_my_commands([
   BotCommand("start_task", "启动循环续费"),
   BotCommand("pause_task", "暂停任务"),
