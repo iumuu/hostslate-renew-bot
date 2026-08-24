@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import asyncio, json, logging, os, sqlite3, threading, time
 from pathlib import Path
-from telegram import Update
+from telegram import BotCommand, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from playwright.async_api import async_playwright
 
@@ -82,7 +82,16 @@ async def loop(app):
    for uid in ALLOWED:
     try: await app.bot.send_message(int(uid),state["last"])
     except Exception: pass
-async def post_init(app): asyncio.create_task(loop(app))
+async def post_init(app):
+ await app.bot.set_my_commands([
+  BotCommand("start_task", "启动循环续费"),
+  BotCommand("pause_task", "暂停任务"),
+  BotCommand("resume_task", "恢复任务"),
+  BotCommand("stop_task", "停止任务"),
+  BotCommand("status", "查看运行状态"),
+  BotCommand("renew", "立即检查一次"),
+ ])
+ asyncio.create_task(loop(app))
 def main():
  initdb(); app=Application.builder().token(TOKEN).post_init(post_init).build()
  for cmd,fn in [("start_task",start),("pause_task",pause),("resume_task",resume),("stop_task",stop),("status",status),("renew",check)]: app.add_handler(CommandHandler(cmd,fn))
