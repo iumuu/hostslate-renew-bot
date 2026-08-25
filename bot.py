@@ -26,6 +26,7 @@ logging.basicConfig(level=logging.INFO,format="%(asctime)s %(levelname)s %(messa
 lock=threading.Lock(); state={"running":False,"paused":False,"busy":False,"phase":"空闲","current":"-","total":0,"done":0,"runs":0,"next_run":"-","last":"未执行"}
 runtime_app=None
 progress_messages={}
+run_lock=asyncio.Lock()
 
 def progress_text():
  progress=f"🔁 第 {state['runs']} 次执行" if state['runs'] else "⏳ 尚未执行"
@@ -64,8 +65,11 @@ async def status(update,context):
 async def start(update,context):
  if not allowed(update): return
  with lock: state.update(running=True,paused=False)
- await update.message.reply_text("🟢 *续费循环已启动*\n\n进度会持续更新在同一条消息中。",parse_mode="Markdown")
- await progress("等待下一轮任务")
+ await update.message.reply_text("🟢 *续费循环已启动*\n\n立即执行第一轮，之后按间隔自动执行。",parse_mode="Markdown")
+ if not run_lock.locked():
+  state["next_run"]="现在"
+  state["last"]=await run_once(force=False)
+
 async def pause(update,context):
  if not allowed(update): return
  with lock: state["paused"]=True
@@ -81,12 +85,20 @@ async def stop(update,context):
  with lock: state.update(running=False,paused=False)
  await progress("任务已停止")
  await update.message.reply_text("⏹️ *任务已停止*",parse_mode="Markdown")
+async def run_once(force=False):
+ if run_lock.locked(): return "已有任务正在执行，已跳过重复启动"
+ async with run_lock:
+  state["next_run"]="执行中"
+  result=await renew_once(force=force)
+  state["last"]=result
+  await progress("本轮任务已完成")
+  return result
 async def check(update,context):
  if not allowed(update): return
  await update.message.reply_text("⏳ 正在强制执行一次续费检查……")
  was_running=state["running"]; state["running"]=True
- result=await renew_once(force=True)
- state["running"]=was_running; state["last"]=result; await progress("手动检查完成"); await update.message.reply_text(result)
+ result=await run_once(force=True)
+ state["running"]=was_running; await update.message.reply_text(result)
 def pick(obj, names, default=None):
  if isinstance(obj, dict):
   for name in names:
@@ -228,15 +240,16 @@ async def api_renew_once(force=False):
   state.update(busy=False,phase="API 执行失败"); return "API 执行失败："+str(e)[:500]
 async def loop(app):
  while True:
-  await asyncio.sleep(INTERVAL)
-  state["next_run"]="现在"
-  if state["running"] and not state["paused"]:
-   state["last"]=await renew_once()
-   await progress("本轮任务已完成")
+  if state["running"] and not state["paused"] and not run_lock.locked():
+   state["next_run"]="现在"
+   result=await run_once(force=False)
    for uid in ALLOWED:
-    try: await app.bot.send_message(int(uid),state["last"])
+    try: await app.bot.send_message(int(uid),result)
     except Exception: pass
-  state["next_run"]=f"约 {INTERVAL//60} 分钟后"
+   state["next_run"]=f"约 {INTERVAL//60} 分钟后"
+  else:
+   state["next_run"]=f"约 {INTERVAL//60} 分钟后" if state["running"] else "未启动"
+  await asyncio.sleep(INTERVAL)
 async def post_init(app):
  global runtime_app
  runtime_app=app
