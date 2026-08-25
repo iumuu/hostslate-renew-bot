@@ -196,13 +196,14 @@ async def api_renew_once():
   state["total"]=len(items); done=0
   for item in items:
    if state["paused"] or not state["running"]: break
-   iid=item.get("id"); name=pick(item,["name","hostname","label"],str(iid)); state["current"]=str(name); await progress(f"API 检查 {name}")
+   iid=item.get("id"); name=pick(item,["name","hostname","label"],str(iid)); state["current"]=str(name); state["done"]=done+1; await progress(f"API 检查 {name}（{done+1}/{len(items)}）")
    if not AUTO_RENEW: done+=1; state["done"]=done; continue
    period=pick(item,["billing_period","period","next_due_at"],"current")
    key=f"api-renew-{iid}-{period}"
    con=sqlite3.connect(DB); old=con.execute("select 1 from orders where key=?",(key,)).fetchone(); con.close()
    if old: done+=1; state["done"]=done; continue
-   async with httpx.AsyncClient(timeout=30) as c:
+   await progress(f"创建续费订单：{name}")
+   async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as c:
     h={"Authorization":API_AUTH_PREFIX+HOSTSLATE_API_KEY,"Content-Type":"application/json"}
     r=await c.post(f"{API_BASE}/portal/instances/{iid}/renew",headers=h,json={"billing_cycle":RENEW_BILLING_CYCLE})
     if r.status_code == 422:
@@ -210,10 +211,17 @@ async def api_renew_once():
     r.raise_for_status(); order=r.json()
     order=order.get("data",order); oid=pick(order,["id","order_id"])
     amount=float(pick(order,["amount","total_amount","payable_amount"],0) or 0)
+    await progress(f"订单已创建：{name}，金额 {amount:.2f}")
     result="renew-created"
     if AUTO_PAY and amount <= MAX_AMOUNT and oid:
      await progress(f"余额支付 {name}（{amount:.2f}）")
-     pr=await c.post(f"{API_BASE}/portal/orders/{oid}/pay",headers=h,json={"provider":"balance","method":"balance"}); pr.raise_for_status(); result="renew-paid"
+     pr=await c.post(f"{API_BASE}/portal/orders/{oid}/pay",headers=h,json={"provider":"balance","method":"balance"})
+     if pr.status_code >= 400: raise RuntimeError(f"余额支付失败 HTTP {pr.status_code}: {pr.text[:300]}")
+     result="renew-paid"
+    elif AUTO_PAY and amount > MAX_AMOUNT:
+     await progress(f"金额 {amount:.2f} 超过上限 {MAX_AMOUNT:.2f}，跳过支付")
+    else:
+     await progress(f"订单待支付：{name}")
     con=sqlite3.connect(DB); con.execute("insert or replace into orders values(?,?,?)",(key,result,int(time.time()))); con.commit(); con.close()
    done+=1; state["done"]=done; await progress(f"完成 {done}/{len(items)}：{name} · {result}")
   state.update(busy=False,phase="API 本轮完成",current="-"); return f"API 本轮完成：{done}/{len(items)}，自动余额支付={AUTO_PAY}"
