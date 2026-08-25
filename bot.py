@@ -83,10 +83,10 @@ async def stop(update,context):
  await update.message.reply_text("⏹️ *任务已停止*",parse_mode="Markdown")
 async def check(update,context):
  if not allowed(update): return
- await update.message.reply_text("正在执行一次检查……")
+ await update.message.reply_text("⏳ 正在强制执行一次续费检查……")
  was_running=state["running"]; state["running"]=True
- result=await renew_once()
- state["running"]=was_running; state["last"]=result; await update.message.reply_text(result)
+ result=await renew_once(force=True)
+ state["running"]=was_running; state["last"]=result; await progress("手动检查完成"); await update.message.reply_text(result)
 def pick(obj, names, default=None):
  if isinstance(obj, dict):
   for name in names:
@@ -138,10 +138,10 @@ async def traffic(update,context):
  try: await update.message.reply_text(await traffic_text(),parse_mode="Markdown")
  except Exception as e: await update.message.reply_text("获取流量失败："+str(e)[:300])
 
-async def renew_once():
+async def renew_once(force=False):
  state["runs"]+=1
  if HOSTSLATE_API_KEY:
-  return await api_renew_once()
+  return await api_renew_once(force=force)
  state.update(busy=True, done=0, total=0, current="-", phase="准备启动")
  try:
   async with async_playwright() as p:
@@ -183,7 +183,7 @@ async def renew_once():
    return f"本轮完成：发现 {n} 个入口，处理 {done} 个，自动支付={AUTO_PAY}。"
  except Exception as e:
   state.update(busy=False,phase="执行失败"); return "执行失败："+str(e)[:500]
-async def api_renew_once():
+async def api_renew_once(force=False):
  state.update(busy=True, done=0, total=0, current="-", phase="API 获取实例")
  try:
   data=await api_get("/portal/instances"); items=data.get("data",data) if isinstance(data,dict) else data
@@ -197,7 +197,7 @@ async def api_renew_once():
    period=pick(item,["billing_period","period","next_due_at"],"current")
    key=f"api-renew-{iid}-{period}"
    con=sqlite3.connect(DB); old=con.execute("select 1 from orders where key=?",(key,)).fetchone(); con.close()
-   if old: done+=1; state["done"]=done; continue
+   if old and not force: done+=1; state["done"]=done; await progress(f"跳过已处理订单：{name}"); continue
    await progress(f"创建续费订单：{name}")
    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as c:
     h={"Authorization":API_AUTH_PREFIX+HOSTSLATE_API_KEY,"Content-Type":"application/json"}
