@@ -231,7 +231,7 @@ async def api_renew_once(force=False):
      await progress(f"订单待支付：{name}")
     con=sqlite3.connect(DB); con.execute("insert or replace into orders values(?,?,?)",(key,result,int(time.time()))); con.commit(); con.close()
    done+=1; state["done"]=done; await progress(f"完成本次实例：{name} · {result}")
-  result_text=f"API 本轮完成，自动余额支付={AUTO_PAY}"
+  result_text=f"本轮完成 · 自动余额支付={AUTO_PAY}"
   state.update(busy=False,phase="本轮完成",current="-",last=result_text)
   await progress("本轮完成")
   return result_text
@@ -243,9 +243,6 @@ async def loop(app):
    if not run_lock.locked():
     state["next_run"]="执行中"
     result=await run_once(force=False)
-    for uid in ALLOWED:
-     try: await app.bot.send_message(int(uid),result)
-     except Exception: pass
    state["next_run"]=f"约 {INTERVAL} 秒后"
   else:
    state["next_run"]="约 1 秒后" if state["running"] else "未启动"
