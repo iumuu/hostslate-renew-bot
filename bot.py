@@ -23,17 +23,12 @@ RENEW_BILLING_CYCLE=os.getenv("RENEW_BILLING_CYCLE","monthly").strip().lower()
 API_AUTH_PREFIX=os.getenv("HOSTSLATE_API_AUTH_PREFIX","Bearer ")
 DATA=Path(os.getenv("DATA_DIR","/app/data")); PROFILE=DATA/"hostslate-profile"; DB=DATA/"state.db"
 logging.basicConfig(level=logging.INFO,format="%(asctime)s %(levelname)s %(message)s")
-lock=threading.Lock(); state={"running":False,"paused":False,"busy":False,"phase":"空闲","current":"-","total":0,"done":0,"next_run":"-","last":"未执行"}
+lock=threading.Lock(); state={"running":False,"paused":False,"busy":False,"phase":"空闲","current":"-","total":0,"done":0,"runs":0,"next_run":"-","last":"未执行"}
 runtime_app=None
 progress_messages={}
 
 def progress_text():
- total=state["total"]; done=state["done"]
- if total:
-  pct=int(done*100/total); width=10; filled=int(width*done/total)
-  bar="🟩"*filled+"⬜"*(width-filled)
-  progress=f"{bar} {pct}%  ({done}/{total})"
- else: progress="⏳ 等待获取实例数量"
+ progress=f"🔁 第 {state['runs']} 次执行" if state['runs'] else "⏳ 尚未执行"
  mode="⏸️ 已暂停" if state["paused"] else ("🟢 运行中" if state["running"] else "⚪ 空闲")
  return ("🔄 *HostSlate 续费任务*\n\n"
          f"{mode}　{'处理中' if state['busy'] else '待命'}\n"
@@ -144,6 +139,7 @@ async def traffic(update,context):
  except Exception as e: await update.message.reply_text("获取流量失败："+str(e)[:300])
 
 async def renew_once():
+ state["runs"]+=1
  if HOSTSLATE_API_KEY:
   return await api_renew_once()
  state.update(busy=True, done=0, total=0, current="-", phase="准备启动")
