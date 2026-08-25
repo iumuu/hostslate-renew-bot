@@ -192,7 +192,7 @@ async def api_renew_once():
   state["total"]=len(items); done=0
   for item in items:
    if state["paused"] or not state["running"]: break
-   iid=item.get("id"); name=pick(item,["name","hostname","label"],str(iid)); state["current"]=str(name); state["done"]=done+1; await progress(f"API 检查 {name}（{done+1}/{len(items)}）")
+   iid=item.get("id"); name=pick(item,["name","hostname","label"],str(iid)); state["current"]=str(name); state["done"]=done+1; await progress(f"API 检查 {name}")
    if not AUTO_RENEW: done+=1; state["done"]=done; continue
    period=pick(item,["billing_period","period","next_due_at"],"current")
    key=f"api-renew-{iid}-{period}"
@@ -219,8 +219,11 @@ async def api_renew_once():
     else:
      await progress(f"订单待支付：{name}")
     con=sqlite3.connect(DB); con.execute("insert or replace into orders values(?,?,?)",(key,result,int(time.time()))); con.commit(); con.close()
-   done+=1; state["done"]=done; await progress(f"完成 {done}/{len(items)}：{name} · {result}")
-  state.update(busy=False,phase="API 本轮完成",current="-"); return f"API 本轮完成：{done}/{len(items)}，自动余额支付={AUTO_PAY}"
+   done+=1; state["done"]=done; await progress(f"完成本次实例：{name} · {result}")
+  result_text=f"API 本轮完成，自动余额支付={AUTO_PAY}"
+  state.update(busy=False,phase="本轮完成",current="-",last=result_text)
+  await progress("本轮完成")
+  return result_text
  except Exception as e:
   state.update(busy=False,phase="API 执行失败"); return "API 执行失败："+str(e)[:500]
 async def loop(app):
@@ -229,6 +232,7 @@ async def loop(app):
   state["next_run"]="现在"
   if state["running"] and not state["paused"]:
    state["last"]=await renew_once()
+   await progress("本轮任务已完成")
    for uid in ALLOWED:
     try: await app.bot.send_message(int(uid),state["last"])
     except Exception: pass
