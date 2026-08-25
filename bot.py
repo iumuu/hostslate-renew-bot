@@ -21,6 +21,7 @@ API_BASE=BASE+"/api/v1"
 TRAFFIC_ALERT_PERCENT=float(os.getenv("TRAFFIC_ALERT_PERCENT","80"))
 RENEW_BILLING_CYCLE=os.getenv("RENEW_BILLING_CYCLE","monthly").strip().lower()
 API_AUTH_PREFIX=os.getenv("HOSTSLATE_API_AUTH_PREFIX","Bearer ")
+AUTO_START=os.getenv("AUTO_START","NO").upper()=="YES"
 DATA=Path(os.getenv("DATA_DIR","/app/data")); PROFILE=DATA/"hostslate-profile"; DB=DATA/"state.db"
 logging.basicConfig(level=logging.INFO,format="%(asctime)s %(levelname)s %(message)s")
 lock=threading.Lock(); state={"running":False,"paused":False,"busy":False,"phase":"空闲","current":"-","total":0,"done":0,"runs":0,"next_run":"-","last":"未执行"}
@@ -65,10 +66,8 @@ async def status(update,context):
 async def start(update,context):
  if not allowed(update): return
  with lock: state.update(running=True,paused=False)
- await update.message.reply_text("🟢 *续费循环已启动*\n\n立即执行第一轮，之后按间隔自动执行。",parse_mode="Markdown")
- if not run_lock.locked():
-  state["next_run"]="现在"
-  state["last"]=await run_once(force=False)
+ await update.message.reply_text("🟢 *续费循环已启动*\n\n后台将自动重复执行，不需要再次点击。",parse_mode="Markdown")
+ state["next_run"]="现在"
 
 async def pause(update,context):
  if not allowed(update): return
@@ -240,19 +239,22 @@ async def api_renew_once(force=False):
   state.update(busy=False,phase="API 执行失败"); return "API 执行失败："+str(e)[:500]
 async def loop(app):
  while True:
-  if state["running"] and not state["paused"] and not run_lock.locked():
-   state["next_run"]="现在"
-   result=await run_once(force=False)
-   for uid in ALLOWED:
-    try: await app.bot.send_message(int(uid),result)
-    except Exception: pass
+  if state["running"] and not state["paused"]:
+   if not run_lock.locked():
+    state["next_run"]="执行中"
+    result=await run_once(force=False)
+    for uid in ALLOWED:
+     try: await app.bot.send_message(int(uid),result)
+     except Exception: pass
    state["next_run"]=f"约 {INTERVAL} 秒后"
   else:
-   state["next_run"]=f"约 {INTERVAL} 秒后" if state["running"] else "未启动"
+   state["next_run"]="约 1 秒后" if state["running"] else "未启动"
   await asyncio.sleep(INTERVAL)
 async def post_init(app):
  global runtime_app
  runtime_app=app
+ if AUTO_START:
+  state.update(running=True,paused=False)
  await app.bot.set_my_commands([
   BotCommand("start_task", "启动循环续费"),
   BotCommand("pause_task", "暂停任务"),
