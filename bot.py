@@ -8,7 +8,7 @@ import httpx
 
 TOKEN=os.environ["TELEGRAM_BOT_TOKEN"].strip()
 ALLOWED={x.strip() for x in os.getenv("TELEGRAM_ALLOWED_USER_IDS","").split(",") if x.strip()}
-INTERVAL=max(60,int(os.getenv("RENEW_INTERVAL_MINUTES","60"))*60)
+INTERVAL=max(1,int(os.getenv("RENEW_INTERVAL_SECONDS","1")))
 AUTO_RENEW=os.getenv("AUTO_RENEW","NO").upper()=="YES"
 AUTO_PAY=os.getenv("AUTO_PAY","NO").upper()=="YES"
 MAX_AMOUNT=float(os.getenv("MAX_RENEW_AMOUNT","0"))
@@ -246,9 +246,9 @@ async def loop(app):
    for uid in ALLOWED:
     try: await app.bot.send_message(int(uid),result)
     except Exception: pass
-   state["next_run"]=f"约 {INTERVAL//60} 分钟后"
+   state["next_run"]=f"约 {INTERVAL} 秒后"
   else:
-   state["next_run"]=f"约 {INTERVAL//60} 分钟后" if state["running"] else "未启动"
+   state["next_run"]=f"约 {INTERVAL} 秒后" if state["running"] else "未启动"
   await asyncio.sleep(INTERVAL)
 async def post_init(app):
  global runtime_app
