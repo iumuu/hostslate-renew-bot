@@ -24,7 +24,7 @@ API_AUTH_PREFIX=os.getenv("HOSTSLATE_API_AUTH_PREFIX","Bearer ")
 AUTO_START=os.getenv("AUTO_START","NO").upper()=="YES"
 DATA=Path(os.getenv("DATA_DIR","/app/data")); PROFILE=DATA/"hostslate-profile"; DB=DATA/"state.db"
 logging.basicConfig(level=logging.INFO,format="%(asctime)s %(levelname)s %(message)s")
-lock=threading.Lock(); state={"running":False,"paused":False,"busy":False,"phase":"空闲","current":"-","total":0,"done":0,"runs":0,"next_run":"-","last":"未执行"}
+lock=threading.Lock(); state={"running":False,"paused":False,"busy":False,"phase":"空闲","current":"-","expiry":"-","total":0,"done":0,"runs":0,"next_run":"-","last":"未执行"}
 runtime_app=None
 progress_messages={}
 run_lock=asyncio.Lock()
@@ -36,6 +36,7 @@ def progress_text():
          f"{mode}　{'处理中' if state['busy'] else '待命'}\n"
          f"📍 阶段：{state['phase']}\n"
          f"🖥️ 当前：{state['current']}\n"
+         f"📅 到期：{state['expiry']}\n"
          f"📈 进度：{progress}\n"
          f"⏱️ 下次运行：{state['next_run']}\n"
          f"📝 最近结果：{state['last']}")
@@ -149,6 +150,30 @@ async def traffic(update,context):
  try: await update.message.reply_text(await traffic_text(),parse_mode="Markdown")
  except Exception as e: await update.message.reply_text("获取流量失败："+str(e)[:300])
 
+async def expiry_text():
+ data=await api_get("/portal/instances")
+ items=data.get("data",data) if isinstance(data,dict) else data
+ if isinstance(items,dict): items=items.get("items",items.get("instances",[]))
+ if not isinstance(items,list): items=[]
+ lines=["📅 *HostSlate VPS 到期时间*","━━━━━━━━━━━━"]
+ for i,item in enumerate(items):
+  iid=item.get("id") if isinstance(item,dict) else None
+  detail=item
+  if iid:
+   try: detail=(await api_get(f"/portal/instances/{iid}")).get("data",{})
+   except Exception: detail=item
+  name=pick(detail,["name","hostname","label"],pick(item,["name","hostname","label"],f"实例 {i+1}"))
+  expiry=pick(detail,["expires_at","expire_at","expiration_date","next_due_at","next_billing_at","billing_end_at"],None)
+  cycle=pick(detail,["billing_cycle","billing_period","period"],RENEW_BILLING_CYCLE)
+  status=pick(detail,["status","state"],"未知")
+  lines += [f"\n🖥️ *{name}*",f"🆔 ID：`{iid}`",f"📅 到期：{expiry or '接口未返回到期字段'}",f"🔁 周期：{cycle}",f"📌 状态：{status}"]
+ return "\n".join(lines) if len(lines)>2 else "📅 未找到 VPS 到期信息。"
+
+async def expiry(update,context):
+ if not allowed(update): return
+ try: await update.message.reply_text(await expiry_text(),parse_mode="Markdown")
+ except Exception as e: await update.message.reply_text("获取到期时间失败："+str(e)[:300])
+
 async def renew_once(force=False):
  state["runs"]+=1
  if HOSTSLATE_API_KEY:
@@ -203,7 +228,15 @@ async def api_renew_once(force=False):
   state["total"]=len(items); done=0
   for item in items:
    if state["paused"] or not state["running"]: break
-   iid=item.get("id"); name=pick(item,["name","hostname","label"],str(iid)); state["current"]=str(name); state["done"]=done+1; await progress(f"API 检查 {name}")
+   iid=item.get("id"); name=pick(item,["name","hostname","label"],str(iid)); state["current"]=str(name)
+   expiry=pick(item,["expires_at","expire_at","expiration_date","next_due_at","next_billing_at","billing_end_at"],None)
+   if iid and not expiry:
+    try:
+     detail=(await api_get(f"/portal/instances/{iid}")).get("data",{})
+     expiry=pick(detail,["expires_at","expire_at","expiration_date","next_due_at","next_billing_at","billing_end_at"],None)
+    except Exception: pass
+   state["expiry"]=str(expiry or "接口未返回")
+   state["done"]=done+1; await progress(f"API 检查 {name}")
    if not AUTO_RENEW: done+=1; state["done"]=done; continue
    period=pick(item,["billing_period","period","next_due_at"],"current")
    key=f"api-renew-{iid}-{period}"
@@ -260,10 +293,11 @@ async def post_init(app):
   BotCommand("status", "查看运行状态"),
   BotCommand("renew", "立即检查一次"),
   BotCommand("traffic", "查看 VPS 流量"),
+  BotCommand("expiry", "查看 VPS 到期时间"),
  ])
  asyncio.create_task(loop(app))
 def main():
  initdb(); app=Application.builder().token(TOKEN).post_init(post_init).build()
- for cmd,fn in [("start_task",start),("pause_task",pause),("resume_task",resume),("stop_task",stop),("status",status),("renew",check),("traffic",traffic)]: app.add_handler(CommandHandler(cmd,fn))
+ for cmd,fn in [("start_task",start),("pause_task",pause),("resume_task",resume),("stop_task",stop),("status",status),("renew",check),("traffic",traffic),("expiry",expiry)]: app.add_handler(CommandHandler(cmd,fn))
  app.run_polling()
 if __name__=="__main__": main()
